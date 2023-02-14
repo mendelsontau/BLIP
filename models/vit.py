@@ -7,7 +7,8 @@
  * Based on timm code base
  * https://github.com/rwightman/pytorch-image-models/tree/master/timm
 '''
-
+import sys
+sys.path.insert(0, "/home/gamir/DER-Roei/alon/BLIP")
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,17 +20,29 @@ from timm.models.layers import trunc_normal_, DropPath
 from timm.models.helpers import named_apply, adapt_input_conv
 
 from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
+from loralib import layers as lora_layers
+import math
+import functools
+from operator import mul
+
+from torch.nn.modules.utils import _pair
 
 class Mlp(nn.Module):
     """ MLP as used in Vision Transformer, MLP-Mixer and related networks
     """
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0., lora = -1):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
+        if lora != -1:
+            self.fc1 = lora_layers.Linear(in_features,hidden_features,r = lora)
+        else:
+            self.fc1 = nn.Linear(in_features, hidden_features)
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        if lora != -1:
+            self.fc2 = lora_layers.Linear(hidden_features,out_features,r = lora)
+        else:
+            self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
@@ -42,15 +55,21 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., lora = -1):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
         self.scale = qk_scale or head_dim ** -0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        if lora != -1:
+            self.qkv = lora_layers.Linear(dim, dim * 3,r = lora)
+        else:
+            self.qkv = nn.Linear(dim, dim * 3,bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        if lora != -1:
+            self.proj = lora_layers.Linear(dim, dim, r = lora)
+        else:
+            self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.attn_gradients = None
         self.attention_map = None
@@ -89,16 +108,16 @@ class Attention(nn.Module):
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_grad_checkpointing=False):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_grad_checkpointing=False, lora = -1):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, lora = lora)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, lora = lora)
 
         if use_grad_checkpointing:
             self.attn = checkpoint_wrapper(self.attn)
@@ -118,7 +137,7 @@ class VisionTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=None, 
-                 use_grad_checkpointing=False, ckpt_layer=0):
+                 use_grad_checkpointing=False, ckpt_layer=0, lora = -1, objects = 0):
         """
         Args:
             img_size (int, tuple): input image size
@@ -149,13 +168,20 @@ class VisionTransformer(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
+        self.objects = objects
+        if self.objects > 0:
+            val = math.sqrt(6. / float(3 * functools.reduce(mul, _pair(patch_size), 1) + embed_dim))  #prompt init per visual prompt tuning
+
+            self.object_tokens = nn.Parameter(torch.zeros(1, self.objects, embed_dim))
+            # xavier_uniform initialization
+            nn.init.uniform_(self.object_tokens, -val, val)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                use_grad_checkpointing=(use_grad_checkpointing and i>=depth-ckpt_layer)
+                use_grad_checkpointing=(use_grad_checkpointing and i>=depth-ckpt_layer), lora = lora
             )
             for i in range(depth)])
         self.norm = norm_layer(embed_dim)
@@ -165,13 +191,21 @@ class VisionTransformer(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
+        if isinstance(m, nn.Linear) and (not isinstance(m, lora_layers.Linear)):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+        elif isinstance(m, lora_layers.Linear):
+            if isinstance(m.lora_A, nn.ParameterList):
+                for i in range(len(m.lora_A)):
+                    trunc_normal_(m.lora_A[i].data, std=math.sqrt(.02))
+                    trunc_normal_(m.lora_B[i].data, std=math.sqrt(.02))
+            else:
+                trunc_normal_(m.lora_A.data, std=math.sqrt(.02))
+                trunc_normal_(m.lora_B.data, std=math.sqrt(.02))
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -186,6 +220,10 @@ class VisionTransformer(nn.Module):
   
         x = x + self.pos_embed[:,:x.size(1),:]
         x = self.pos_drop(x)
+        if self.objects > 0:
+            object_tokens = self.object_tokens.expand(B, -1, -1)
+
+            x = torch.cat((x[:,0,:].unsqueeze(dim = 1), object_tokens, x[:,1:,:]), dim=1)
 
         for i,blk in enumerate(self.blocks):
             x = blk(x, register_blk==i)
