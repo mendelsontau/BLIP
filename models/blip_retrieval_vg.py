@@ -74,7 +74,6 @@ class BLIP_Retrieval_vg(nn.Module):
         device = torch.device(args.device)
 
         self.objects = args.objects
-
         self.object_tokens = args.object_tokens
         
         self.visual_encoder, vision_width = create_vit(vit,image_size, vit_grad_ckpt, vit_ckpt_layer, lora = args.lora, objects = self.object_tokens)
@@ -142,10 +141,10 @@ class BLIP_Retrieval_vg(nn.Module):
 
             self.class_head = MLP_Head(vision_width, vision_width, embed_dim,3).to(device)
             self.bb_head = MLP_Head(vision_width, vision_width, 4, 3).to(device)
-            if args.distributed:
-                self.class_head = torch.nn.parallel.DistributedDataParallel(self.class_head, device_ids=[args.gpu])
-                self.bb_head = torch.nn.parallel.DistributedDataParallel(self.bb_head, device_ids=[args.gpu])
-            self.random_row = torch.rand(1, embed_dim)
+            #self.random_row = torch.rand(1, embed_dim)
+            #self.no_object_row = torch.rand(1, embed_dim)
+            self.random_row = nn.Parameter(torch.zeros(1,embed_dim))
+            self.no_object_row = nn.Parameter(torch.zeros(1,embed_dim))
         
     def forward(self, image, caption, alpha, idx, vg_batch_size = 0, ignore_mask = None, objects_descs = None, targets = None):
         with torch.no_grad():
@@ -216,10 +215,6 @@ class BLIP_Retrieval_vg(nn.Module):
             #separate object descs and remove negatives
             if self.vg_loss_lambda > 0.0:
                 objects_descs_feat_m = text_feat_m[-num_object_descs:]
-                no_object_rows_to_add = self.num_matcher_classes + 1 - num_object_descs
-                random_rows = torch.clone(self.random_row)
-                random_rows = random_rows.expand(no_object_rows_to_add,-1).to(image.device)
-                objects_descs_feat_m = torch.cat([objects_descs_feat_m,random_rows])
                 text_feat_m = text_feat_m[:-num_object_descs]
 
             if self.negatives_loss:
@@ -247,6 +242,11 @@ class BLIP_Retrieval_vg(nn.Module):
 
         ###============== Hungarian Matching ====================###
         if self.vg_loss_lambda > 0.0:
+            no_object_rows_to_add = self.num_matcher_classes - num_object_descs
+            random_rows = self.random_row
+            no_object_row = self.no_object_row.to(image.device)
+            random_rows = random_rows.expand(no_object_rows_to_add,-1).to(image.device)
+            objects_descs_feat_m = torch.cat([objects_descs_feat_m,random_rows,no_object_row])
             label_embeddings = self.class_head(object_tokens)
             label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
             bb_predictions = self.bb_head(object_tokens).sigmoid()

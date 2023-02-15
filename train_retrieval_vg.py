@@ -91,6 +91,7 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
         metric_logger.add_meter('loss_bbox', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
         metric_logger.add_meter('loss_giou', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
         metric_logger.add_meter('loss_sg', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+        metric_logger.add_meter('ce_correct', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     header = 'Train Epoch: [{}]'.format(epoch)
     print_freq = 50
 
@@ -154,6 +155,8 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
             loss_ce = loss_dict["loss_ce"]
             loss_bbox = loss_dict["loss_bbox"]
             loss_giou = loss_dict["loss_giou"]
+            ce_correct = loss_dict["ce_correct"]
+            loss_dict.pop("ce_correct")
             loss_sg = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict) * args.vg_loss_lambda                  
             loss +=  loss_sg
         
@@ -170,6 +173,7 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
             metric_logger.update(loss_bbox=loss_bbox.item())
             metric_logger.update(loss_giou=loss_giou.item())
             metric_logger.update(loss_sg=loss_sg.item())
+            metric_logger.update(ce_correct=ce_correct)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
     # gather the stats from all processes
@@ -218,6 +222,9 @@ def main(args, config):
 
     if args.object_tokens > 0:
         model.visual_encoder.object_tokens.requires_grad_()
+    
+    model.random_row.requires_grad_()
+    model.no_object_row.requires_grad_()
 
     for name, param in model.named_parameters():
         if param.requires_grad:
@@ -385,14 +392,19 @@ if __name__ == '__main__':
     parser.add_argument('--vg-batch-size', default = 8, type=int)
     parser.add_argument('--objects', default = 0, type=int)
     parser.add_argument('--object-tokens', default = 0, type=int)
+    parser.add_argument('--relations', default = 0, type=int)
+    parser.add_argument('--relation-tokens', default = 0, type=int)
     parser.add_argument('--winoground-frequency', default = 0, type=int)
     parser.add_argument('--vlchecklist-frequency', default = 0, type=int)
     parser.add_argument('--lora', default = -1, type=int)
     parser.add_argument('--resume', default = None, type=str)
+    parser.add_argument('--lr', default = 0.0001, type=float)
+
     
     args = parser.parse_args()
     config = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
     args.batch_size = config["batch_size"]
+    config["init_lr"] = args.lr
     args.output_dir = os.path.join(args.output_dir,args.name)
     Path(os.path.join(args.output_dir)).mkdir(parents=True, exist_ok=True)
         
