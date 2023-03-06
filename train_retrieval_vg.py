@@ -398,6 +398,16 @@ def main(args, config):
         model.no_object_row.requires_grad_()
         if args.relations > 0:
             model.no_relation_row.requires_grad_()
+    
+    if args.blip_mt:
+        for h in range(args.num_heads):
+            bb_head = model.blip_mt_bb_heads[h]
+            for param in bb_head.parameters():
+                param.requires_grad_()
+            class_head = model.blip_mt_class_heads[h]
+            for param in class_head.parameters():
+                param.requires_grad_()
+
 
     for name, param in model.named_parameters():
         if param.requires_grad:
@@ -620,6 +630,8 @@ if __name__ == '__main__':
     parser.add_argument("--laion-augmentations", action='store_true')
     parser.add_argument("--no-dense-ablation", default = 0, type=int)
     parser.add_argument("--no-relation-ablation", action='store_true')
+    parser.add_argument("--blip-mt", action='store_true')
+    parser.add_argument("--num-heads", default = 0, type=int)
     
 
 

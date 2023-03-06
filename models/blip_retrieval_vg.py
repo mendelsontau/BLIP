@@ -132,6 +132,11 @@ class BLIP_Retrieval_vg(nn.Module):
             self.hn_loss = HNLoss()
 
         self.vg_loss_lambda = args.vg_loss_lambda
+        
+        self.blip_mt = args.blip_mt
+        if args.blip_mt:
+            self.blip_mt_class_heads = [MLP_Head(vision_width, vision_width, embed_dim,3).to(device) for i in range(args.num_heads)]
+            self.blip_mt_bb_heads = [MLP_Head(vision_width, vision_width, 4,3).to(device) for i in range(args.num_heads)]
 
         if self.vg_loss_lambda > 0.0:
             weight_dict = {'loss_ce': args.loss_ce, 'loss_bbox': 5}
@@ -173,7 +178,9 @@ class BLIP_Retrieval_vg(nn.Module):
 
         #extract object tokens from image encoder and add object descriptions to caption
         if self.vg_loss_lambda > 0:
-            object_tokens = image_embeds[-vg_batch_size:,1 : 1 + self.object_tokens ,:]    
+            object_tokens = image_embeds[-vg_batch_size:,1 : 1 + self.object_tokens ,:]
+            if self.blip_mt:
+                image_cls = image_embeds[-vg_batch_size:,0,:]   
             caption += objects_descs
             if self.relations > 0:
                 relation_tokens = image_embeds[-vg_batch_size:,1 + self.object_tokens : 1 + self.object_tokens + self.relation_tokens,:]
@@ -290,29 +297,62 @@ class BLIP_Retrieval_vg(nn.Module):
 
         ###============== Hungarian Matching ====================###
         if self.vg_loss_lambda > 0.0:
-            no_object_rows_to_add = self.num_matcher_classes - num_object_descs
-            random_rows = self.random_row
-            no_object_row = self.no_object_row.to(image.device)
-            random_rows = random_rows.expand(no_object_rows_to_add,-1).to(image.device)
-            objects_descs_feat_m = torch.cat([objects_descs_feat_m,random_rows,no_object_row])
-            label_embeddings = self.class_head(object_tokens)
-            label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
-            bb_predictions = self.bb_head(object_tokens).sigmoid()
-            predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
-            loss_dict = self.vgcriterion(predictions_dict, targets)
-            weight_dict = self.vgcriterion.weight_dict
-            if self.relations > 0:
-                no_relation_rows_to_add = self.num_relation_classes - num_relation_descs
+            if not self.blip_mt:
+                no_object_rows_to_add = self.num_matcher_classes - num_object_descs
                 random_rows = self.random_row
-                no_relation_row = self.no_relation_row.to(image.device)
-                random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(image.device)
-                relations_descs_feat_m = torch.cat([relations_descs_feat_m,random_rows,no_relation_row])
-                label_embeddings = self.class_head(relation_tokens)
-                label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
-                bb_predictions = self.bb_head(relation_tokens).sigmoid()
+                no_object_row = self.no_object_row.to(image.device)
+                random_rows = random_rows.expand(no_object_rows_to_add,-1).to(image.device)
+                objects_descs_feat_m = torch.cat([objects_descs_feat_m,random_rows,no_object_row])
+                label_embeddings = self.class_head(object_tokens)
+                label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
+                bb_predictions = self.bb_head(object_tokens).sigmoid()
                 predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
-                relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
-                loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}
+                loss_dict = self.vgcriterion(predictions_dict, targets)
+                weight_dict = self.vgcriterion.weight_dict
+                if self.relations > 0:
+                    no_relation_rows_to_add = self.num_relation_classes - num_relation_descs
+                    random_rows = self.random_row
+                    no_relation_row = self.no_relation_row.to(image.device)
+                    random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(image.device)
+                    relations_descs_feat_m = torch.cat([relations_descs_feat_m,random_rows,no_relation_row])
+                    label_embeddings = self.class_head(relation_tokens)
+                    label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
+                    bb_predictions = self.bb_head(relation_tokens).sigmoid()
+                    predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
+                    relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
+                    loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}
+            else:
+                no_object_rows_to_add = self.num_matcher_classes - num_object_descs
+                random_rows = self.random_row
+                no_object_row = self.no_object_row.to(image.device)
+                random_rows = random_rows.expand(no_object_rows_to_add,-1).to(image.device)
+                objects_descs_feat_m = torch.cat([objects_descs_feat_m,random_rows,no_object_row])
+                label_embeddings = []
+                bb_predictions = []
+                for h in range(len(self.blip_mt_bb_heads)):
+                    bb_head = self.blip_mt_bb_heads[h]
+                    class_head = self.blip_mt_class_heads[h]
+                    bb = bb_head(image_cls).sigmoid()
+                    c = class_head(image_cls)
+                    label_embeddings.append(c)
+                    bb_predictions.append(bb)
+                label_embeddings = torch.transpose(torch.stack(label_embeddings),0,1)
+                bb_predictions = torch.transpose(torch.stack(bb_predictions),0,1)
+                label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
+                predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
+                loss_dict = self.vgcriterion(predictions_dict, targets)
+                weight_dict = self.vgcriterion.weight_dict
+                if self.relations > 0:
+                    no_relation_rows_to_add = self.num_relation_classes - num_relation_descs
+                    random_rows = self.random_row
+                    no_relation_row = self.no_relation_row.to(image.device)
+                    random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(image.device)
+                    relations_descs_feat_m = torch.cat([relations_descs_feat_m,random_rows,no_relation_row])
+                    label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
+                    bb_predictions = self.bb_head(relation_tokens).sigmoid()
+                    predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
+                    relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
+                    loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}   
                   
         else:
             loss_dict = None
