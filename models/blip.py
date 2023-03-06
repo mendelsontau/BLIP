@@ -191,14 +191,14 @@ def init_tokenizer():
     return tokenizer
 
 
-def create_vit(vit, image_size, use_grad_checkpointing=False, ckpt_layer=0, drop_path_rate=0, lora = -1, objects = 0):
+def create_vit(vit, image_size, use_grad_checkpointing=False, ckpt_layer=0, drop_path_rate=0, lora = -1, prompts_lora = -1, objects = 0, relations=0, prompt_attention = False, prompt_attention_full = False, mask_layers = None):
         
     assert vit in ['base', 'large'], "vit parameter must be base or large"
     if vit=='base':
         vision_width = 768
         visual_encoder = VisionTransformer(img_size=image_size, patch_size=16, embed_dim=vision_width, depth=12, 
                                            num_heads=12, use_grad_checkpointing=use_grad_checkpointing, ckpt_layer=ckpt_layer,
-                                           drop_path_rate=0 or drop_path_rate, lora = lora, objects = objects
+                                           drop_path_rate=0 or drop_path_rate, lora = lora, prompts_lora=prompts_lora, objects = objects, relations=relations, prompt_attention = prompt_attention, prompt_attention_full=prompt_attention_full, mask_layers=mask_layers
                                           )   
     elif vit=='large':
         vision_width = 1024

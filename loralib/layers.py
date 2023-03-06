@@ -282,6 +282,8 @@ class Conv2d(nn.Conv2d, LoRALayer):
         nn.Conv2d.__init__(self, in_channels, out_channels, kernel_size, **kwargs)
         LoRALayer.__init__(self, r=r, lora_alpha=lora_alpha, lora_dropout=lora_dropout,
                            merge_weights=merge_weights)
+        if len(kernel_size) == 2:
+            kernel_size = kernel_size[0]
         assert type(kernel_size) is int
         # Actual trainable parameters
         if r > 0:

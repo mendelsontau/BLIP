@@ -382,3 +382,71 @@ def get_data(args,  epoch=0):
         data["train"] = get_dataset_fn(args.train_data, args.dataset_type)(
             args, preprocess_train, is_train=True, epoch=epoch)
     return data
+
+import re
+import random
+
+def apply_negative_type_1(caption, relations_annotations):
+    word_list = re.split(r" ", caption)
+    word_pairs_list = [word_list[i] + " " + word_list[i+1] for i in range(len(word_list)-1)]
+    word_list += word_pairs_list
+    success = False
+    for word in word_list:
+        if word in relations_annotations:
+            negations = relations_annotations[word]["negations"]
+            if negations != "":
+                possibilities = negations.split(",")
+                caption = caption.replace(word, random.choice(possibilities))
+                success = True
+    return success, caption
+
+
+def apply_negative_type_2(caption, attributes_annotations):
+    word_list = re.split(r" ", caption)
+    success = False
+    for word in word_list:
+        if word in attributes_annotations:
+            if "negations" in attributes_annotations[word]:
+                possibilities = attributes_annotations[word]["negations"]
+                if len(possibilities) > 0:
+                    caption = caption.replace(word, random.choice(possibilities))
+                    ssuccess = True
+    return success, caption
+
+
+def apply_negative_type_1(caption, relations_annotations):
+    word_list = re.split(r" ", caption)
+    word_pairs_list = [word_list[i] + " " + word_list[i+1] for i in range(len(word_list)-1)]
+    word_list += word_pairs_list
+    success = False
+    for word in word_list:
+        if word in relations_annotations:
+            negations = relations_annotations[word]["negations"]
+            if negations != "":
+                possibilities = negations.split(",")
+                caption = caption.replace(word, random.choice(possibilities))
+                success = True
+    return success, caption
+
+def augment_laion_pairs(captions, relations_annotations, attributes_annotations):
+    neg_texts = []
+    neg_mask = []
+    for caption in captions:
+        start_index = random.randint(0,2)
+        for i in range(start_index,start_index + 2):
+            negative_type = i % 2
+            if negative_type == 0:
+                success, neg_text = apply_negative_type_1(caption, relations_annotations)
+            if negative_type == 1:
+                success, neg_text = apply_negative_type_2(caption, attributes_annotations)
+            if success == True:
+                break
+        
+        if success:
+            neg_texts.append(neg_text)
+            neg_mask.append(1.0)
+        else:
+            neg_texts.append("")
+            neg_mask.append(0.0)
+    
+    return neg_texts, neg_mask

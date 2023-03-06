@@ -75,12 +75,18 @@ class BLIP_Retrieval_vg(nn.Module):
 
         self.objects = args.objects
         self.object_tokens = args.object_tokens
-        
-        self.visual_encoder, vision_width = create_vit(vit,image_size, vit_grad_ckpt, vit_ckpt_layer, lora = args.lora, objects = self.object_tokens)
+        self.relations = args.relations
+        self.relation_tokens = args.relation_tokens
+        self.prompt_attention = True if args.prompt_attention else False
+        self.prompt_attention_full = True if args.prompt_attention_full else False
+        self.mask_layers = args.mask_layers
+        self.text_lora = args.text_lora
+        self.image_lora = args.image_lora
+        self.visual_encoder, vision_width = create_vit(vit,image_size, vit_grad_ckpt, vit_ckpt_layer, lora = args.lora if self.image_lora else -1, prompts_lora = args.prompts_lora, objects = self.object_tokens, relations = self.relation_tokens, prompt_attention = self.prompt_attention, prompt_attention_full = self.prompt_attention_full, mask_layers=self.mask_layers)
         self.tokenizer = init_tokenizer()   
         med_config = BertConfig.from_json_file(med_config)
         med_config.encoder_width = vision_width
-        self.text_encoder = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora)          
+        self.text_encoder = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora if self.text_lora else -1)          
 
         text_width = self.text_encoder.config.hidden_size
         
@@ -93,9 +99,9 @@ class BLIP_Retrieval_vg(nn.Module):
 
         
         # create momentum encoders  
-        self.visual_encoder_m, vision_width = create_vit(vit,image_size, lora = args.lora, objects = self.object_tokens)              
+        self.visual_encoder_m, vision_width = create_vit(vit,image_size, lora = args.lora if self.image_lora else -1, prompts_lora = args.prompts_lora, objects = self.object_tokens, relations = self.relation_tokens, prompt_attention = self.prompt_attention , prompt_attention_full = self.prompt_attention_full, mask_layers=self.mask_layers)              
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
-        self.text_encoder_m = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora)    
+        self.text_encoder_m = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora if self.text_lora else -1)    
         self.text_proj_m = nn.Linear(text_width, embed_dim)
         
         self.model_pairs = [[self.visual_encoder,self.visual_encoder_m],
@@ -128,10 +134,11 @@ class BLIP_Retrieval_vg(nn.Module):
         self.vg_loss_lambda = args.vg_loss_lambda
 
         if self.vg_loss_lambda > 0.0:
-            matcher = HungarianMatcher() 
-            weight_dict = {'loss_ce': 1, 'loss_bbox': 5}
+            weight_dict = {'loss_ce': args.loss_ce, 'loss_bbox': 5}
             weight_dict['loss_giou'] = 2
             losses = ['labels','boxes','cardinality']
+            matcher = HungarianMatcher(cost_class=weight_dict["loss_ce"],cost_bbox=weight_dict["loss_bbox"],cost_giou=weight_dict["loss_giou"]) 
+
 
             self.num_matcher_classes = args.vg_batch_size * args.objects
 
@@ -145,8 +152,17 @@ class BLIP_Retrieval_vg(nn.Module):
             #self.no_object_row = torch.rand(1, embed_dim)
             self.random_row = nn.Parameter(torch.zeros(1,embed_dim))
             self.no_object_row = nn.Parameter(torch.zeros(1,embed_dim))
+            if self.relations > 0:
+                self.num_relation_classes = args.vg_batch_size * args.relations
+                self.vgrelcriterion = SetCriterion(self.num_relation_classes, matcher=matcher, weight_dict=weight_dict,
+                                eos_coef=0.2, losses=losses)
+                self.vgrelcriterion.to(args.device)
+                self.no_relation_row = nn.Parameter(torch.zeros(1,embed_dim))
+                self.rel_class_head = MLP_Head(vision_width, vision_width, embed_dim,3).to(device)
+                self.rel_bb_head = MLP_Head(vision_width, vision_width, 4, 3).to(device)
         
-    def forward(self, image, caption, alpha, idx, vg_batch_size = 0, ignore_mask = None, objects_descs = None, targets = None):
+    def forward(self, image, caption, alpha, idx, vg_batch_size = 0, ignore_mask = None, objects_descs = None, targets = None, relations_descs = None, relations_targets = None
+    , laion_negs = None, laion_neg_mask = None):
         with torch.no_grad():
             self.temp.clamp_(0.001,0.5)
         
@@ -159,6 +175,9 @@ class BLIP_Retrieval_vg(nn.Module):
         if self.vg_loss_lambda > 0:
             object_tokens = image_embeds[-vg_batch_size:,1 : 1 + self.object_tokens ,:]    
             caption += objects_descs
+            if self.relations > 0:
+                relation_tokens = image_embeds[-vg_batch_size:,1 + self.object_tokens : 1 + self.object_tokens + self.relation_tokens,:]
+                caption += relations_descs
 
         text_no_adds = self.tokenizer(caption[:image.shape[0]],padding='max_length', truncation=True, max_length=35, 
                               return_tensors="pt").to(image.device)
@@ -166,6 +185,11 @@ class BLIP_Retrieval_vg(nn.Module):
         if self.negatives_loss:
                         text_negs = self.tokenizer(caption[image.shape[0]:image.shape[0] + vg_batch_size],padding='max_length', truncation=True, max_length=35, 
                               return_tensors="pt").to(image.device)
+        
+        if laion_negs != None:
+            laion_text_negs  = self.tokenizer(laion_negs,padding='max_length', truncation=True, max_length=35, 
+                              return_tensors="pt").to(image.device)
+            caption += laion_negs
 
         text = self.tokenizer(caption, padding='max_length', truncation=True, max_length=35, 
                               return_tensors="pt").to(image.device) 
@@ -179,8 +203,12 @@ class BLIP_Retrieval_vg(nn.Module):
         #here text features includes laion, vg, vg_neg and object_descs + ""
         #we separate object descs from the rest
         if self.vg_loss_lambda > 0:
+            if self.relations > 0:
+                num_relation_descs = len(relations_descs)
+                text_feat = text_feat[:-(num_relation_descs)]
             num_object_descs = len(objects_descs)
             text_feat = text_feat[:-(num_object_descs)]
+
         
         #calculate negatives loss
         neg_loss = 0.0
@@ -188,6 +216,20 @@ class BLIP_Retrieval_vg(nn.Module):
             neg_loss = self.hn_loss(image_feat, text_feat, ignore_mask, vg_batch_size)
             #remove neagtives
             text_feat = text_feat[:-vg_batch_size]
+
+        if laion_negs != None:
+            if not torch.sum(laion_neg_mask) == 0.0:
+                laion_image_features = image_feat
+                positive_text_features = text_feat[:image.shape[0],:]
+                negative_text_features = text_feat[-image.shape[0]:,:]
+                positive_similarity = torch.diagonal(laion_image_features @ positive_text_features.T)
+                negative_similarity = torch.diagonal(laion_image_features @ negative_text_features.T)
+                positive_similarity = torch.exp(positive_similarity)
+                negative_similarity = torch.exp(negative_similarity)
+                denominator = positive_similarity + negative_similarity
+                loss_per_sample = -torch.log(torch.div(positive_similarity,denominator))
+                neg_loss += torch.dot(loss_per_sample, laion_neg_mask)/torch.sum(laion_neg_mask)
+            text_feat = text_feat[:-image.shape[0]]
         
 
         
@@ -214,11 +256,17 @@ class BLIP_Retrieval_vg(nn.Module):
 
             #separate object descs and remove negatives
             if self.vg_loss_lambda > 0.0:
+                if self.relations > 0:
+                    relations_descs_feat_m = text_feat_m[-num_relation_descs:]
+                    text_feat_m = text_feat_m[:-num_relation_descs]
                 objects_descs_feat_m = text_feat_m[-num_object_descs:]
                 text_feat_m = text_feat_m[:-num_object_descs]
 
             if self.negatives_loss:
                     text_feat_m = text_feat_m[:-vg_batch_size]
+            
+            if laion_negs != None:
+                text_feat_m = text_feat_m[:-image.shape[0]]
 
 
             text_feat_m_all = torch.cat([text_feat_m.t(),self.text_queue.clone().detach()],dim=1)
@@ -252,7 +300,20 @@ class BLIP_Retrieval_vg(nn.Module):
             bb_predictions = self.bb_head(object_tokens).sigmoid()
             predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
             loss_dict = self.vgcriterion(predictions_dict, targets)
-            weight_dict = self.vgcriterion.weight_dict  
+            weight_dict = self.vgcriterion.weight_dict
+            if self.relations > 0:
+                no_relation_rows_to_add = self.num_relation_classes - num_relation_descs
+                random_rows = self.random_row
+                no_relation_row = self.no_relation_row.to(image.device)
+                random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(image.device)
+                relations_descs_feat_m = torch.cat([relations_descs_feat_m,random_rows,no_relation_row])
+                label_embeddings = self.class_head(relation_tokens)
+                label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
+                bb_predictions = self.bb_head(relation_tokens).sigmoid()
+                predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
+                relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
+                loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}
+                  
         else:
             loss_dict = None
             weight_dict = None 
@@ -379,6 +440,24 @@ class BLIP_Retrieval_vg(nn.Module):
                                dim=0).to(image.device)
             loss_vg_itm = F.cross_entropy(vl_vg_output, itm_vg_labels)
             neg_loss += loss_vg_itm
+            neg_loss /= 2
+
+        if laion_negs != None:
+            text_negs_input_ids = laion_text_negs.input_ids.clone()
+            text_negs_input_ids[:,0] = self.tokenizer.enc_token_id
+            output_neg_laion = self.text_encoder(text_negs_input_ids,
+                                        attention_mask = laion_text_negs.attention_mask,
+                                        encoder_hidden_states = image_embeds,
+                                        encoder_attention_mask = image_atts,      
+                                        return_dict = True,
+                                        )  
+
+            vl_laion_embeddings = torch.cat([output_pos.last_hidden_state[:,0,:], output_neg_laion.last_hidden_state[:,0,:]],dim=0)
+            vl_laion_output = self.itm_head(vl_laion_embeddings)
+            itm_laion_labels = torch.cat([torch.ones(image.shape[0],dtype=torch.long),torch.zeros(image.shape[0],dtype=torch.long)],
+                               dim=0).to(image.device)
+            loss_laion_itm = F.cross_entropy(vl_laion_output, itm_laion_labels)
+            neg_loss += loss_laion_itm
             neg_loss /= 2
 
         return loss_ita, loss_itm, neg_loss, loss_dict, weight_dict

@@ -7,7 +7,7 @@
 '''
 import argparse
 import os
-import ruamel_yaml as yaml
+import ruamel.yaml as yaml
 import numpy as np
 import random
 import time
@@ -26,6 +26,7 @@ from models.blip_retrieval import blip_retrieval
 import utils
 from utils import cosine_lr_schedule
 from data import create_dataset, create_sampler, create_loader
+from Winoground.evaluate_winoground import evaluate_winoground, blip_processor
 
 
 def train(model, data_loader, optimizer, epoch, device, config):
@@ -264,7 +265,12 @@ def main(args, config):
     best_epoch = 0
 
     print("Start training")
-    start_time = time.time()    
+    start_time = time.time()
+    if utils.is_main_process():    
+        processor = blip_processor(config["image_size"])
+        evaluate_winoground(model_without_ddp, processor,device)
+    
+    dist.barrier()
 
     for epoch in range(0, config['max_epoch']):    
         if not args.evaluate:        

@@ -123,7 +123,7 @@ def apply_negative_type_1(walks, relations_annotations):
             rel = walk[r]
             if rel["object_id"] != -1:
                 all_relations.append((rel,w,r))
-
+    success = False
     random.shuffle(all_relations)
     for rand_rel in all_relations:
         success = False
@@ -152,7 +152,7 @@ def apply_negative_type_2(walks, relations_annotations):
             rel = walk[r]
             if rel["object_id"] != -1:
                 all_relations.append((rel,w,r))
-
+    success = False
     random.shuffle(all_relations)
     for rand_rel in all_relations:
         success = False
@@ -172,8 +172,13 @@ def apply_negative_type_2(walks, relations_annotations):
     return success, walks
 
 class VgDatasetText(Dataset):
-    def __init__(self, vg_path, split, transforms, num_objects, vg_loss_lambda, negatives = False):
-        f = open(os.path.join(vg_path,"vg_150k_" + split +  ".json"))
+    def __init__(self, vg_path, split, transforms, num_objects, vg_loss_lambda, negatives = False, relations = 0, no_dense = 0, no_relation = False):
+        if no_dense > 0:
+            f = open(os.path.join(vg_path,"vg_150k_" + split + "_no_dense_" + str(no_dense) +  ".json"))
+        elif no_relation:
+            f = open(os.path.join(vg_path,"vg_150k_" + split + "_no_relation" +  ".json"))
+        else:
+            f = open(os.path.join(vg_path,"vg_150k_" + split + ".json"))
         self.data = json.load(f)
         f = open(os.path.join(vg_path,"relations_annotations.json"))
         self.relations_annotations = json.load(f)
@@ -186,6 +191,9 @@ class VgDatasetText(Dataset):
         self.num_objects = num_objects
         self.negatives = negatives
         self.only_text = True if vg_loss_lambda == 0.0 else False
+        self.relations  = relations > 0
+        self.num_relations = relations
+        self.no_relation = no_relation
         logging.debug('Done loading data.')
 
     def __len__(self):
@@ -211,6 +219,7 @@ class VgDatasetText(Dataset):
         image = image.crop(crop_dimensions)
         image = self.transforms(image)
 
+        walks = self.data[idx]["relations"]
         all_objects_dict = self.data[idx]["objects"]
         objects = []
         for id in all_objects_dict:
@@ -218,9 +227,14 @@ class VgDatasetText(Dataset):
         if not self.only_text:
             missing_objects = self.num_objects - len(objects)
             valid_objects = torch.tensor(self.num_objects - missing_objects, dtype=torch.long)
+            if self.relations:
+                #find all relations
+                relations = [y for x in walks for y in x]
+                relations = [rel for rel in relations if rel["relationship_id"] != -1]
+                missing_relations = self.num_relations - len(relations)
+                valid_relations = torch.tensor(self.num_relations - missing_relations, dtype=torch.long)
         
         #generate text
-        walks = self.data[idx]["relations"]
         text = create_text_from_graph(walks, all_objects_dict)
 
         #generate negatives
@@ -280,24 +294,75 @@ class VgDatasetText(Dataset):
             object_descriptions = [repair_text(desc)for desc in object_descriptions]
             if missing_objects > 0:
                 object_descriptions += ["" for i in range(missing_objects)]
-            if self.split == "val":
-                max_chars = 150
-                object_text = [[ord(c) for c in s] for s in object_descriptions]
-                padding = [[int(36) for i in range(max_chars - len(s))] for s in object_descriptions]
-                object_texts = [lst1 + lst2 for lst1, lst2 in zip(object_text,padding)]
-                text_lengths = [len(s) for s in object_descriptions]
+
+            if self.relations:
+                #prepare relations bounding boxes
+                relations_bbs = []
+                for relation in relations:
+                    subject_id = relation["subject_id"]
+                    object_id = relation["object_id"]
+                    subject_index = 0
+                    object_index = 0
+                    for k in range (len(objects)):
+                        if objects[k]["object_id"] == subject_id:
+                            subject_index = k
+                        if objects[k]["object_id"] == object_id:
+                            object_index = k
+                    subject_bb = objects_bbs[subject_index]
+                    object_bb = objects_bbs[object_index]
+                    relation_x_min = min(subject_bb[0],object_bb[0])
+                    relation_y_min = min(subject_bb[1],object_bb[1])
+                    relation_x_max = max(subject_bb[0] + subject_bb[2],object_bb[0] + object_bb[2])
+                    relation_y_max = max(subject_bb[1] + subject_bb[3],object_bb[1] + object_bb[3])
+                    relation_w = relation_x_max - relation_x_min
+                    relation_h = relation_y_max - relation_y_min
+                    relation_bb = [relation_x_min,relation_y_min,relation_w,relation_h]
+                    relations_bbs.append(relation_bb)
+
+                relations_bounding_boxes = [[(ob[0] + 0.5*ob[2])/image_w,(ob[1] + 0.5*ob[3])/image_h,min((ob[2])/image_w,1.0),min((ob[3])/image_h,1.0)] for ob in relations_bbs]
+                if missing_relations > 0:
+                    relations_bounding_boxes += [[0.0,0.0,0.0,0.0] for i in range(missing_relations)]
+                relations_bounding_boxes = torch.tensor(relations_bounding_boxes)
+
+
+                #prepare relation descriptions
+                relations_descriptions = []
+                for relation in relations:
+                    subject_id = str(relation["subject_id"])
+                    object_id = str(relation["object_id"])
+                    subject_description =  all_objects_dict[subject_id]["names"][0] 
+                    obj_description =  all_objects_dict[object_id]["names"][0]
+                    predicate = relation["predicate"]
+                    relation_description = subject_description + " " + predicate + " " + obj_description
+                    relations_descriptions.append(relation_description)
+                relations_descriptions = [repair_text(desc)for desc in relations_descriptions]
+                if missing_relations > 0:
+                    relations_descriptions += ["" for i in range(missing_relations)]
+
+
+
+            
 
         if self.only_text:
             if self.negatives:
                 return image, text, neg_text, neg_mask, idx
             else:
                 return image, text, idx
+
+        
         if self.split == "train" and self.negatives:
-            return image, text, valid_objects, bounding_boxes, object_descriptions, neg_text, neg_mask, idx
+            if not self.relations:
+                return image, text, valid_objects, bounding_boxes, object_descriptions, neg_text, neg_mask, idx
+            else:
+                return image, text, valid_objects, bounding_boxes, object_descriptions, valid_relations, relations_bounding_boxes, relations_descriptions, neg_text, neg_mask, idx
+    
         elif self.split == "train" and not self.negatives:
-            return image, text, valid_objects, bounding_boxes, object_descriptions, idx
+            if not self.relations:
+                return image, text, valid_objects, bounding_boxes, object_descriptions, idx
+            else:
+                return image, text, valid_objects, bounding_boxes, object_descriptions, valid_relations, relations_bounding_boxes, relations_descriptions, idx
         else:
-            return image, text, valid_objects, bounding_boxes, object_descriptions, torch.tensor(object_texts), text_lengths
+            return image, text, valid_objects, bounding_boxes, object_descriptions
 
 
 def get_vg_loader(dataset, args, vg_batch_size):
@@ -319,8 +384,7 @@ def get_vg_val_loader(dataset, args, vg_batch_size):
     dataloader = DataLoader(
         dataset,
         batch_size=vg_batch_size,
-        num_workers=args.workers,
-        pin_memory=True
+        num_workers=1
     )
     return dataloader
 

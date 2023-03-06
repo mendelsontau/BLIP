@@ -19,5 +19,5 @@ negative_all_rank: True
 # optimizer
 weight_decay: 0.05
 min_lr: 0
-max_epoch: 20
+max_epoch: 16
 
