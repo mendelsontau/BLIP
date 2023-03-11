@@ -172,7 +172,7 @@ def apply_negative_type_2(walks, relations_annotations):
     return success, walks
 
 class VgDatasetText(Dataset):
-    def __init__(self, vg_path, split, transforms, num_objects, vg_loss_lambda, negatives = False, relations = 0, no_dense = 0, no_relation = False):
+    def __init__(self, vg_path, split, transforms, num_objects, vg_loss_lambda, negatives = False, relations = 0, no_dense = 0, no_relation = False, size_ablation = 1.0):
         if no_dense > 0:
             f = open(os.path.join(vg_path,"vg_150k_" + split + "_no_dense_" + str(no_dense) +  ".json"))
         elif no_relation:
@@ -180,6 +180,9 @@ class VgDatasetText(Dataset):
         else:
             f = open(os.path.join(vg_path,"vg_150k_" + split + ".json"))
         self.data = json.load(f)
+        if (size_ablation != 1.0):
+            trunc = int(len(self.data)*size_ablation)
+            self.data = self.data[:trunc]
         f = open(os.path.join(vg_path,"relations_annotations.json"))
         self.relations_annotations = json.load(f)
         f = open(os.path.join(vg_path,"attributes_annotations.json"))

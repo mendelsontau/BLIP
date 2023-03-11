@@ -280,7 +280,7 @@ class VisionTransformer(nn.Module):
 
             self.relation_tokens = nn.Parameter(torch.zeros(1, self.relations, embed_dim))
             # xavier_uniform initialization
-            nn.init.uniform_(self.object_tokens, -val, val)
+            nn.init.uniform_(self.relation_tokens, -val, val)
 
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule

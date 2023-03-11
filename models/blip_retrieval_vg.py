@@ -134,6 +134,7 @@ class BLIP_Retrieval_vg(nn.Module):
         self.vg_loss_lambda = args.vg_loss_lambda
 
         if self.vg_loss_lambda > 0.0:
+            self.random_graph_ablation = args.random_graph_ablation
             weight_dict = {'loss_ce': args.loss_ce, 'loss_bbox': 5}
             weight_dict['loss_giou'] = 2
             losses = ['labels','boxes','cardinality']
@@ -143,19 +144,17 @@ class BLIP_Retrieval_vg(nn.Module):
             self.num_matcher_classes = args.vg_batch_size * args.objects
 
             self.vgcriterion = SetCriterion(self.num_matcher_classes, matcher=matcher, weight_dict=weight_dict,
-                             eos_coef=0.1, losses=losses)
+                             eos_coef=(5.5/self.object_tokens), losses=losses)
             self.vgcriterion.to(args.device)
 
             self.class_head = MLP_Head(vision_width, vision_width, embed_dim,3).to(device)
             self.bb_head = MLP_Head(vision_width, vision_width, 4, 3).to(device)
-            #self.random_row = torch.rand(1, embed_dim)
-            #self.no_object_row = torch.rand(1, embed_dim)
             self.random_row = nn.Parameter(torch.zeros(1,embed_dim))
             self.no_object_row = nn.Parameter(torch.zeros(1,embed_dim))
             if self.relations > 0:
                 self.num_relation_classes = args.vg_batch_size * args.relations
                 self.vgrelcriterion = SetCriterion(self.num_relation_classes, matcher=matcher, weight_dict=weight_dict,
-                                eos_coef=0.2, losses=losses)
+                                eos_coef=(1.8/self.relation_tokens), losses=losses)
                 self.vgrelcriterion.to(args.device)
                 self.no_relation_row = nn.Parameter(torch.zeros(1,embed_dim))
                 self.rel_class_head = MLP_Head(vision_width, vision_width, embed_dim,3).to(device)
@@ -298,6 +297,11 @@ class BLIP_Retrieval_vg(nn.Module):
             label_embeddings = self.class_head(object_tokens)
             label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
             bb_predictions = self.bb_head(object_tokens).sigmoid()
+            if self.random_graph_ablation:
+                perm1 = torch.randperm(bb_predictions.shape[0])
+                perm2 = torch.randperm(bb_predictions.shape[0])
+                label_predictions = label_predictions[perm1]
+                bb_predictions = bb_predictions[perm2]
             predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
             loss_dict = self.vgcriterion(predictions_dict, targets)
             weight_dict = self.vgcriterion.weight_dict
@@ -307,9 +311,9 @@ class BLIP_Retrieval_vg(nn.Module):
                 no_relation_row = self.no_relation_row.to(image.device)
                 random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(image.device)
                 relations_descs_feat_m = torch.cat([relations_descs_feat_m,random_rows,no_relation_row])
-                label_embeddings = self.class_head(relation_tokens)
+                label_embeddings = self.rel_class_head(relation_tokens)
                 label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
-                bb_predictions = self.bb_head(relation_tokens).sigmoid()
+                bb_predictions = self.rel_bb_head(relation_tokens).sigmoid()
                 predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
                 relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
                 loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}

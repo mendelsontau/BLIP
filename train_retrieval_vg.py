@@ -31,6 +31,7 @@ sys.path.insert(0, "/home/gamir/DER-Roei/alon/BLIP")
 from laion_dataset import get_data, augment_laion_pairs
 from vg_dataset import VgDatasetText, get_vg_loader, get_vg_val_loader
 from Winoground.evaluate_winoground import evaluate_winoground, blip_processor
+from vsr.evaluate_vsr import evaluate_vsr
 from VL_CheckList.example_models.blip.engine import BLIP
 from VL_CheckList.vl_checklist.evaluate import Evaluate
 from torchvision import transforms as transforms
@@ -40,6 +41,18 @@ from torchvision.transforms.functional import convert_image_dtype
 from detr.util.box_ops import box_cxcywh_to_xyxy
 from torchvision.utils import draw_bounding_boxes
 
+
+def remove_repetitions(object_indexes, label_predictions_list):
+    new_object_indexes = []
+    seen_labels = []
+    for idx in object_indexes:
+        label = label_predictions_list[idx]
+        if label in seen_labels:
+            continue
+        else:
+            seen_labels.append(label)
+            new_object_indexes.append(idx)
+    return new_object_indexes
 
 def organize_batch_classes(object_descriptions, valid_objects, vg_bbs, args, device):
     class_tokens = []
@@ -127,12 +140,12 @@ def evaluate_auxiliary(model,batch,args,epoch):
     device = torch.device(args.device)
     model.eval()
     vg_images, _, valid_objects, bounding_boxes, object_descriptions_t = batch
-    randomlist = random.sample(range(0, 16), 8)
-    vg_images = vg_images[randomlist]
-    valid_objects = valid_objects[randomlist]
-    bounding_boxes = bounding_boxes[randomlist]
+    #randomlist = random.sample(range(0, 16), 8)
+    #vg_images = vg_images[randomlist]
+    #valid_objects = valid_objects[randomlist]
+    #bounding_boxes = bounding_boxes[randomlist]
     object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
-    object_descriptions = [object_descriptions[i] for i in randomlist]
+    #object_descriptions = [object_descriptions[i] for i in randomlist]
     object_descriptions, targets = organize_batch_classes(object_descriptions,valid_objects,bounding_boxes,args,device)
     num_object_descs = len(object_descriptions)
     no_object_rows_to_add = model.num_matcher_classes - num_object_descs
@@ -170,6 +183,7 @@ def evaluate_auxiliary(model,batch,args,epoch):
     for i in range(vg_images.shape[0]):
         full_image_path = os.path.join(visualizations_folder_epoch, "img_bb_" + str(i) +  ".jpg")
         full_image_path_gt = os.path.join(visualizations_folder_epoch, "img_bb_gt_" + str(i) +  ".jpg")
+        just_image_path = os.path.join(visualizations_folder_epoch, "img_" + str(i) +  ".jpg")
         img = vg_images[i]
         img = inv_trans(img)
         img = torch.clamp(img,min=0.0,max=1.0)
@@ -183,12 +197,15 @@ def evaluate_auxiliary(model,batch,args,epoch):
         #new_image.save(full_image_path_gt)
         label_predictions_list = label_predictions[i].tolist()
         object_indexes = [j for j in range(len(label_predictions_list)) if label_predictions_list[j] != model.num_matcher_classes]
+        object_indexes = remove_repetitions(object_indexes, label_predictions_list)
         bb = bb_predictions[i,object_indexes,:]
         label = label_predictions[i,object_indexes]
         labels = [object_descriptions[j] for j in label.tolist()]
-        bb_img = draw_bounding_boxes(img,bb,labels)
-        new_image = transforms.ToPILImage()(bb_img)
-        new_image.save(full_image_path)
+        #bb_img = draw_bounding_boxes(img,bb,labels,colors = "white")
+        #new_image = transforms.ToPILImage()(bb_img)
+        #new_image.save(full_image_path)
+        img = transforms.ToPILImage()(img)
+        img.save(just_image_path)
     return loss_dict
 
 
@@ -384,13 +401,13 @@ def main(args, config):
                     param.requires_grad_()
     
     if args.prompt_attention_full:
-        if not args.prompts_lora > 0:
             for b in model.visual_encoder.blocks:
+                if not args.prompts_lora > 0:
+                    for param in b.mlp_prompts.parameters():
+                        param.requires_grad_()
                 for param in b.norm1_prompts.parameters():
                     param.requires_grad_()
                 for param in b.norm2_prompts.parameters():
-                    param.requires_grad_()
-                for param in b.mlp_prompts.parameters():
                     param.requires_grad_()
 
     if args.vg_loss_lambda > 0.0:
@@ -448,7 +465,7 @@ def main(args, config):
     vg_dataloader = None 
     if args.vg_data:
         print("Creating vg dataset")
-        vg_train_dataset = VgDatasetText(args.vg_data, "train", processor, args.objects, args.vg_loss_lambda, args.negatives, args.relations, args.no_dense_ablation, args.no_relation_ablation)
+        vg_train_dataset = VgDatasetText(args.vg_data, "train", processor, args.objects, args.vg_loss_lambda, args.negatives, args.relations, args.no_dense_ablation, args.no_relation_ablation, args.size_ablation)
         vg_dataloader = get_vg_loader(vg_train_dataset, args, args.vg_batch_size)
         if args.vg_loss_lambda > 0.0 and args.auxiliary_frequency > 0:
             vg_val_dataset = VgDatasetText(args.vg_data, "val", processor, args.objects, args.vg_loss_lambda)
@@ -542,6 +559,17 @@ def main(args, config):
                                 }
                     with open(os.path.join(args.output_dir, "evaluate.txt"),"a") as f:
                         f.write(json.dumps(vg_stats) + "\n") 
+                if args.vsr_frequency > 0:
+                    vsr_folder = os.path.join(args.output_dir,"vsr")
+                    vsr_dict_path1 = os.path.join(vsr_folder,"vsr_" + str(epoch))
+                    vsr_dict_path2 = os.path.join(vsr_folder,"vsr_meta_" + str(epoch))
+                    results_by_cat, results_by_meta_cat = evaluate_vsr(model_without_ddp,blip_processor(config["image_size"]),device)
+                    if not os.path.exists(vsr_folder):
+                        os.mkdir(vsr_folder)
+                    with open(os.path.join(vsr_dict_path1), 'w',encoding='utf-8') as f:
+                        json.dump(results_by_cat, f)
+                    with open(os.path.join(vsr_dict_path2), 'w',encoding='utf-8') as f:
+                        json.dump(results_by_meta_cat, f)
             else:
                 if args.winoground_frequency > 0 and (epoch + 1) % args.winoground_frequency == 0:
                     processor = blip_processor(config["image_size"])
@@ -613,6 +641,7 @@ if __name__ == '__main__':
     parser.add_argument('--vlchecklist-frequency', default = 0, type=int)
     parser.add_argument('--auxiliary-frequency', default = 0, type=int)
     parser.add_argument('--checkpoint-frequency', default = 0, type=int)
+    parser.add_argument('--vsr-frequency', default = 0, type=int)
     parser.add_argument('--lora', default = -1, type=int)
     parser.add_argument('--text-lora', action='store_true')
     parser.add_argument('--image-lora', action='store_true')
@@ -628,6 +657,9 @@ if __name__ == '__main__':
     parser.add_argument("--laion-augmentations", action='store_true')
     parser.add_argument("--no-dense-ablation", default = 0, type=int)
     parser.add_argument("--no-relation-ablation", action='store_true')
+    parser.add_argument("--random-graph-ablation", action='store_true')
+    parser.add_argument("--size-ablation", default = 1.0, type=float)
+
     
 
 
