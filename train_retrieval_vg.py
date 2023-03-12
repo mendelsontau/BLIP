@@ -266,11 +266,11 @@ def evaluate_auxiliary_relations(model,batch,args,epoch):
     return loss_dict
 
 
-def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_loader = None):
+def train(model, optimizer, epoch, device, config, args, vg_data_loader = None):
     # train
     model.train()  
     
-    metric_logger = utils.MetricLogger(data_loader.num_batches, delimiter="  ")
+    metric_logger = utils.MetricLogger(len(vg_data_loader), delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('loss_itm', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     metric_logger.add_meter('loss_ita', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
@@ -292,66 +292,50 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
         f = open(os.path.join("../../../datasets/vg","attributes_annotations.json"))
         attributes_annotations = json.load(f)
 
-    if vg_data_loader != None:
-        vg_iter = iter(vg_data_loader)
-
-    for i,(image, caption, idx) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        idx = [int(id) for id in idx]
-        idx = torch.IntTensor(idx)
-
-        laion_negs = None
-        laion_neg_mask = None
-        if args.laion_augmentations:
-            laion_negs, laion_neg_mask = augment_laion_pairs(caption, relations_annotations, attributes_annotations)
-            laion_neg_mask = torch.tensor(laion_neg_mask).to(device,non_blocking=True)
+    for i,(vg_batch) in enumerate(metric_logger.log_every(vg_data_loader, print_freq, header)):
+        caption = []
         neg_mask = None
         objects_descs = None
         targets = None
         relations_descs = None
         relations_targets = None
-        if vg_data_loader != None:
-            try:
-                vg_batch = next(vg_iter)
-            except StopIteration:
-                vg_iter = iter(vg_data_loader)
-                vg_batch = next(vg_iter)
-            if args.vg_loss_lambda > 0.0:
-                if args.relations > 0:
-                    if args.negatives:
-                        vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, valid_relations, relations_bounding_boxes, relation_descriptions_t, neg_text, neg_mask, vg_idx =  vg_batch
-                        object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
-                        relation_descriptions = [list(x) for x in zip(*relation_descriptions_t)]
-                        vg_text += neg_text
-                        neg_mask = neg_mask.to(device,non_blocking=True)
-                    else:
-                        vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, valid_relations, relations_bounding_boxes, relation_descriptions_t, vg_idx =  vg_batch
-                        object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
-                        relation_descriptions = [list(x) for x in zip(*relation_descriptions_t)]
-                    relations_descs, relations_targets = organize_batch_classes_relations(relation_descriptions,valid_relations,relations_bounding_boxes,args,device)
+        if args.vg_loss_lambda > 0.0:
+            if args.relations > 0:
+                if args.negatives:
+                    vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, valid_relations, relations_bounding_boxes, relation_descriptions_t, neg_text, neg_mask, vg_idx =  vg_batch
+                    object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
+                    relation_descriptions = [list(x) for x in zip(*relation_descriptions_t)]
+                    vg_text += neg_text
+                    neg_mask = neg_mask.to(device,non_blocking=True)
                 else:
-                    if args.negatives:
-                        vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, neg_text, neg_mask, vg_idx =  vg_batch
-                        object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
-                        vg_text += neg_text
-                        neg_mask = neg_mask.to(device,non_blocking=True)
-                    else:
-                        vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, vg_idx =  vg_batch
-                        object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
-                objects_descs, targets = organize_batch_classes(object_descriptions, valid_objects, bounding_boxes, args, device)
+                    vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, valid_relations, relations_bounding_boxes, relation_descriptions_t, vg_idx =  vg_batch
+                    object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
+                    relation_descriptions = [list(x) for x in zip(*relation_descriptions_t)]
+                relations_descs, relations_targets = organize_batch_classes_relations(relation_descriptions,valid_relations,relations_bounding_boxes,args,device)
             else:
                 if args.negatives:
-                    vg_image, vg_text, neg_text, neg_mask, vg_idx = vg_batch
+                    vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, neg_text, neg_mask, vg_idx =  vg_batch
+                    object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
                     vg_text += neg_text
-                    neg_mask = neg_mask.to(device,non_blocking=True) 
+                    neg_mask = neg_mask.to(device,non_blocking=True)
                 else:
-                    vg_image, vg_text, vg_idx = vg_batch
+                    vg_image, vg_text, valid_objects, bounding_boxes, object_descriptions_t, vg_idx =  vg_batch
+                    object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
+            objects_descs, targets = organize_batch_classes(object_descriptions, valid_objects, bounding_boxes, args, device)
+        else:
+            if args.negatives:
+                vg_image, vg_text, neg_text, neg_mask, vg_idx = vg_batch
+                vg_text += neg_text
+                neg_mask = neg_mask.to(device,non_blocking=True) 
+            else:
+                vg_image, vg_text, vg_idx = vg_batch
 
             
         
 
-            caption += vg_text
-            image = torch.cat([image,vg_image])
-            idx = torch.cat([idx,vg_idx])
+        caption += vg_text
+        image = vg_image
+        idx = vg_idx
 
         
         image = image.to(device,non_blocking=True)   
@@ -362,9 +346,9 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
         if epoch>0:
             alpha = config['alpha']
         else:
-            alpha = config['alpha']*min(1,i/data_loader.num_batches)
+            alpha = config['alpha']*min(1,i/len(vg_data_loader))
 
-        loss_ita, loss_itm, loss_neg, loss_dict, weight_dict = model(image, caption, alpha=alpha, idx=idx, vg_batch_size=vg_batch_size, ignore_mask=neg_mask, objects_descs = objects_descs, targets = targets, relations_descs = relations_descs, relations_targets=relations_targets, laion_negs = laion_negs, laion_neg_mask = laion_neg_mask)
+        loss_ita, loss_itm, loss_neg, loss_dict, weight_dict = model(image, caption, alpha=alpha, idx=idx, vg_batch_size=vg_batch_size, ignore_mask=neg_mask, objects_descs = objects_descs, targets = targets, relations_descs = relations_descs, relations_targets=relations_targets, laion_negs = None, laion_neg_mask = None)
         loss = loss_ita + loss_itm
         if args.negatives or args.laion_augmentations:
             loss += loss_neg
@@ -514,9 +498,9 @@ def main(args, config):
             print("=> no checkpoint found at '{}'".format(args.resume))        
 
     #### laion Dataset #### 
-    print("Creating laion dataset")
-    data = get_data(args, epoch=start_epoch)
-    train_loader = data["train"].dataloader
+    #print("Creating laion dataset")
+    #data = get_data(args, epoch=start_epoch)
+    #train_loader = data["train"].dataloader
 
     #### vg Dataset ####
     vg_dataloader = None 
@@ -541,16 +525,16 @@ def main(args, config):
     for epoch in range(start_epoch, config['max_epoch']):    
         if not args.evaluate:        
             if args.distributed:
-                data["train"].set_epoch(epoch)
+                #data["train"].set_epoch(epoch)
                 if vg_dataloader != None:
                     vg_dataloader.sampler.set_epoch(epoch)
                 
             cosine_lr_schedule(optimizer, epoch, config['max_epoch'], config['init_lr'], config['min_lr'])
             
             if args.vg_data:
-                train_stats = train(model, train_loader, optimizer, epoch, device, config, args,vg_data_loader=vg_dataloader)
+                train_stats = train(model, optimizer, epoch, device, config, args,vg_data_loader=vg_dataloader)
             else:
-                train_stats = train(model, train_loader, optimizer, epoch, device, config, args)
+                train_stats = train(model, optimizer, epoch, device, config, args)
             
 
             #log train stats
