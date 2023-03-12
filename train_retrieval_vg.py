@@ -131,7 +131,7 @@ def organize_batch_classes_relations(relation_descriptions, valid_relations, vg_
     targets = [{"labels": l, "boxes": b} for l,b in zip(tgt_labels,tgt_boxes)]
     return class_tokens, targets
 
-def evaluate_auxiliary(model,batch,args,epoch):
+def evaluate_auxiliary_objects(model,batch,args,epoch):
     inv_trans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
                                                      std = [ 1/0.26862954, 1/0.26130258, 1/0.27577711 ]),
                                 transforms.Normalize(mean = [ -0.48145466, -0.4578275, -0.40821073 ],
@@ -139,7 +139,7 @@ def evaluate_auxiliary(model,batch,args,epoch):
                                ])
     device = torch.device(args.device)
     model.eval()
-    vg_images, _, valid_objects, bounding_boxes, object_descriptions_t = batch
+    vg_images, _, valid_objects, bounding_boxes, object_descriptions_t,_,_,_ = batch
     #randomlist = random.sample(range(0, 16), 8)
     #vg_images = vg_images[randomlist]
     #valid_objects = valid_objects[randomlist]
@@ -188,24 +188,81 @@ def evaluate_auxiliary(model,batch,args,epoch):
         img = inv_trans(img)
         img = torch.clamp(img,min=0.0,max=1.0)
         img = convert_image_dtype(img,torch.uint8)
-        #bb_gt = bounding_boxes[i, : valid_objects[i].item(),:]
-        #bb_gt = box_cxcywh_to_xyxy(bb_gt) * 224
-        #labels_gt = object_descriptions[gt_labels_index : gt_labels_index + valid_objects[i].item()]
-        #gt_labels_index += valid_objects[i].item()
-        #bb_img = draw_bounding_boxes(img,bb_gt,labels_gt)
-        #new_image = transforms.ToPILImage()(bb_img)
-        #new_image.save(full_image_path_gt)
         label_predictions_list = label_predictions[i].tolist()
         object_indexes = [j for j in range(len(label_predictions_list)) if label_predictions_list[j] != model.num_matcher_classes]
         object_indexes = remove_repetitions(object_indexes, label_predictions_list)
         bb = bb_predictions[i,object_indexes,:]
         label = label_predictions[i,object_indexes]
         labels = [object_descriptions[j] for j in label.tolist()]
-        #bb_img = draw_bounding_boxes(img,bb,labels,colors = "white")
-        #new_image = transforms.ToPILImage()(bb_img)
-        #new_image.save(full_image_path)
-        img = transforms.ToPILImage()(img)
-        img.save(just_image_path)
+        bb_img = draw_bounding_boxes(img,bb,labels)
+        new_image = transforms.ToPILImage()(bb_img)
+        new_image.save(full_image_path)
+    return loss_dict
+
+
+def evaluate_auxiliary_relations(model,batch,args,epoch):
+    inv_trans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
+                                                     std = [ 1/0.26862954, 1/0.26130258, 1/0.27577711 ]),
+                                transforms.Normalize(mean = [ -0.48145466, -0.4578275, -0.40821073 ],
+                                                     std = [ 1., 1., 1. ]),
+                               ])
+    device = torch.device(args.device)
+    model.eval()
+    vg_images, _,_,_,_, valid_relations, bounding_boxes, relation_descriptions_t = batch
+    #randomlist = random.sample(range(0, 16), 8)
+    #vg_images = vg_images[randomlist]
+    #valid_objects = valid_objects[randomlist]
+    #bounding_boxes = bounding_boxes[randomlist]
+    relation_descriptions = [list(x) for x in zip(*relation_descriptions_t)]
+    #object_descriptions = [object_descriptions[i] for i in randomlist]
+    relation_descriptions, targets = organize_batch_classes_relations(relation_descriptions,valid_relations,bounding_boxes,args,device)
+    num_relation_descs = len(relation_descriptions)
+    no_relation_rows_to_add = model.num_relation_classes - num_relation_descs
+    vg_images = vg_images.to(device=device, non_blocking=True)
+    with torch.no_grad():
+        text = model.tokenizer(relation_descriptions,padding='max_length', truncation=True, max_length=35, 
+                                    return_tensors="pt").to(device)
+        relation_descriptions += no_relation_rows_to_add*["random row"] + ["no object"]
+        image_embeds = model.visual_encoder(vg_images)        
+        relation_tokens = image_embeds[:,1 + args.object_tokens : 1 + args.object_tokens + args.relation_tokens ,:]
+        text_output_m = model.text_encoder_m(text.input_ids, attention_mask = text.attention_mask,                      
+                                            return_dict = True, mode = 'text')    
+        text_feat = F.normalize(model.text_proj_m(text_output_m.last_hidden_state[:,0,:]),dim=-1)
+        random_rows = model.random_row
+        no_object_row = model.no_relation_row.to(device)
+        random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(device)
+        relations_descs_feat_m = torch.cat([text_feat,random_rows,no_object_row])
+        label_embeddings = model.class_head(relation_tokens)
+        label_probs = label_embeddings @ relations_descs_feat_m.t() / model.temp 
+        bb_predictions = model.bb_head(relation_tokens).sigmoid()
+        predictions_dict = {"pred_logits" : label_probs, "pred_boxes": bb_predictions}
+        loss_dict = model.vgrelcriterion(predictions_dict, targets)
+        label_predictions = torch.argmax(label_probs, dim = -1)
+        bb_predictions = box_cxcywh_to_xyxy(bb_predictions) * 224
+    bb_predictions = bb_predictions.detach().cpu()
+    label_predictions = label_predictions.detach().cpu()
+    vg_images = vg_images.cpu()
+    visualizations_folder = os.path.join(args.output_dir,"visualizations")
+    if not os.path.exists(visualizations_folder):
+        os.mkdir(visualizations_folder)
+    visualizations_folder_epoch = os.path.join(visualizations_folder,str(epoch))
+    if not os.path.exists(visualizations_folder_epoch):
+        os.mkdir(visualizations_folder_epoch)
+    for i in range(vg_images.shape[0]):
+        full_image_path = os.path.join(visualizations_folder_epoch, "img_bb_relation_" + str(i) +  ".jpg")
+        img = vg_images[i]
+        img = inv_trans(img)
+        img = torch.clamp(img,min=0.0,max=1.0)
+        img = convert_image_dtype(img,torch.uint8)
+        label_predictions_list = label_predictions[i].tolist()
+        relation_indexes = [j for j in range(len(label_predictions_list)) if label_predictions_list[j] != model.num_relation_classes]
+        relation_indexes = remove_repetitions(relation_indexes, label_predictions_list)
+        bb = bb_predictions[i,relation_indexes,:]
+        label = label_predictions[i,relation_indexes]
+        labels = [relation_descriptions[j] for j in label.tolist()]
+        relation_img = draw_bounding_boxes(img,bb,labels)
+        new_image = transforms.ToPILImage()(relation_img)
+        new_image.save(full_image_path)
     return loss_dict
 
 
@@ -468,7 +525,7 @@ def main(args, config):
         vg_train_dataset = VgDatasetText(args.vg_data, "train", processor, args.objects, args.vg_loss_lambda, args.negatives, args.relations, args.no_dense_ablation, args.no_relation_ablation, args.size_ablation)
         vg_dataloader = get_vg_loader(vg_train_dataset, args, args.vg_batch_size)
         if args.vg_loss_lambda > 0.0 and args.auxiliary_frequency > 0:
-            vg_val_dataset = VgDatasetText(args.vg_data, "val", processor, args.objects, args.vg_loss_lambda)
+            vg_val_dataset = VgDatasetText(args.vg_data, "val", processor, args.objects, args.vg_loss_lambda, False, args.relations)
             vg_val_dataloader = get_vg_val_loader(vg_val_dataset, args, 16)
             vg_val_iterator = iter(vg_val_dataloader)
             vg_val_batch = next(vg_val_iterator)
@@ -554,8 +611,11 @@ def main(args, config):
                     vl_eval.start()
                 
                 if args.auxiliary_frequency > 0:
-                    val_loss_dict = evaluate_auxiliary(model_without_ddp,vg_val_batch,args,epoch)
-                    vg_stats = {**{f'val_{k}': v.item() if torch.is_tensor(v) else v for k, v in val_loss_dict.items() }                  
+                    val_loss_dict_objects = evaluate_auxiliary_objects(model_without_ddp,vg_val_batch,args,epoch)
+                    val_loss_dict_relations = evaluate_auxiliary_relations(model_without_ddp,vg_val_batch,args,epoch)
+                    vg_stats = {**{f'val_{k}': v.item() if torch.is_tensor(v) else v for k, v in val_loss_dict_objects.items() }                  
+                                }
+                    vg_stats = {**{f'val_{k}': v.item() if torch.is_tensor(v) else v for k, v in val_loss_dict_relations.items() }                  
                                 }
                     with open(os.path.join(args.output_dir, "evaluate.txt"),"a") as f:
                         f.write(json.dumps(vg_stats) + "\n") 

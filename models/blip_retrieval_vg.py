@@ -314,6 +314,11 @@ class BLIP_Retrieval_vg(nn.Module):
                 label_embeddings = self.rel_class_head(relation_tokens)
                 label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
                 bb_predictions = self.rel_bb_head(relation_tokens).sigmoid()
+                if self.random_graph_ablation:
+                    perm1 = torch.randperm(bb_predictions.shape[0])
+                    perm2 = torch.randperm(bb_predictions.shape[0])
+                    label_predictions = label_predictions[perm1]
+                    bb_predictions = bb_predictions[perm2]
                 predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
                 relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
                 loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}

@@ -365,7 +365,11 @@ class VgDatasetText(Dataset):
             else:
                 return image, text, valid_objects, bounding_boxes, object_descriptions, valid_relations, relations_bounding_boxes, relations_descriptions, idx
         else:
-            return image, text, valid_objects, bounding_boxes, object_descriptions
+            if not self.relations:
+                return image, text, valid_objects, bounding_boxes, object_descriptions
+            else:
+                return image, text, valid_objects, bounding_boxes, object_descriptions, valid_relations, relations_bounding_boxes, relations_descriptions
+
 
 
 def get_vg_loader(dataset, args, vg_batch_size):
