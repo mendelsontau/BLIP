@@ -134,7 +134,6 @@ class BLIP_Retrieval_vg(nn.Module):
         self.vg_loss_lambda = args.vg_loss_lambda
 
         if self.vg_loss_lambda > 0.0:
-            self.random_graph_ablation = args.random_graph_ablation
             weight_dict = {'loss_ce': args.loss_ce, 'loss_bbox': 5}
             weight_dict['loss_giou'] = 2
             losses = ['labels','boxes','cardinality']
@@ -297,11 +296,6 @@ class BLIP_Retrieval_vg(nn.Module):
             label_embeddings = self.class_head(object_tokens)
             label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
             bb_predictions = self.bb_head(object_tokens).sigmoid()
-            if self.random_graph_ablation:
-                perm1 = torch.randperm(bb_predictions.shape[0])
-                perm2 = torch.randperm(bb_predictions.shape[0])
-                label_predictions = label_predictions[perm1]
-                bb_predictions = bb_predictions[perm2]
             predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
             loss_dict = self.vgcriterion(predictions_dict, targets)
             weight_dict = self.vgcriterion.weight_dict
@@ -314,11 +308,6 @@ class BLIP_Retrieval_vg(nn.Module):
                 label_embeddings = self.rel_class_head(relation_tokens)
                 label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
                 bb_predictions = self.rel_bb_head(relation_tokens).sigmoid()
-                if self.random_graph_ablation:
-                    perm1 = torch.randperm(bb_predictions.shape[0])
-                    perm2 = torch.randperm(bb_predictions.shape[0])
-                    label_predictions = label_predictions[perm1]
-                    bb_predictions = bb_predictions[perm2]
                 predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
                 relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
                 loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}
@@ -514,6 +503,23 @@ def blip_retrieval_vg(pretrained='',**kwargs):
         model,msg = load_checkpoint(model,pretrained)
         print("missing keys:")
         print(msg.missing_keys)
+        args = kwargs["args"]
+        with torch.no_grad():
+            if args.prompts_lora != -1:
+                for b in model.visual_encoder.blocks:
+                    b.mlp_prompts.fc1.weight.copy_(b.mlp.fc1.weight)
+                    b.mlp_prompts.fc1.bias.copy_(b.mlp.fc1.bias)
+                    b.mlp_prompts.fc2.weight.copy_(b.mlp.fc2.weight)
+                    b.mlp_prompts.fc2.bias.copy_(b.mlp.fc2.bias)
+                    b.attn.qkv_prompts.weight.copy_(b.attn.qkv.weight)
+                    b.attn.qkv_prompts.bias.copy_(b.attn.qkv.bias)
+                    b.attn.proj_prompts.weight.copy_(b.attn.proj.weight)
+                    b.attn.proj_prompts.bias.copy_(b.attn.proj.bias)
+                    b.norm1_prompts.weight.copy_(b.norm1.weight)
+                    b.norm1_prompts.bias.copy_(b.norm1.bias)
+                    b.norm2_prompts.weight.copy_(b.norm2.weight)
+                    b.norm2_prompts.bias.copy_(b.norm2.bias)
+
     return model 
 
 

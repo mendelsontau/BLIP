@@ -144,7 +144,7 @@ def evaluate_winoground(blip_model, blip_processor, device):
         + "\t".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()])
         )
 
-    return winoground_dict
+    return winoground_dict, result_dict_itm
 
 
 #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

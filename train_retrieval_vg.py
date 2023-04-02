@@ -26,6 +26,7 @@ from models.blip_retrieval_vg import blip_retrieval_vg
 import utils
 from utils import cosine_lr_schedule
 from data import create_dataset, create_sampler, create_loader
+from data.coco_karpathy_dataset import coco_karpathy_caption_eval
 import sys
 sys.path.insert(0, "/home/gamir/DER-Roei/alon/BLIP")
 from laion_dataset import get_data, augment_laion_pairs
@@ -40,6 +41,124 @@ from loralib import mark_only_lora_as_trainable
 from torchvision.transforms.functional import convert_image_dtype
 from detr.util.box_ops import box_cxcywh_to_xyxy
 from torchvision.utils import draw_bounding_boxes
+from tqdm import tqdm
+from bb_tools import mean_average_precision
+
+def evaluate_map_objects(model,batch,args,epoch):
+    inv_trans = transforms.Compose([ transforms.Normalize(mean = [ 0., 0., 0. ],
+                                                     std = [ 1/0.26862954, 1/0.26130258, 1/0.27577711 ]),
+                                transforms.Normalize(mean = [ -0.48145466, -0.4578275, -0.40821073 ],
+                                                     std = [ 1., 1., 1. ]),
+                               ])
+    device = torch.device(args.device)
+    model.eval()
+    vg_images, _, valid_objects, bounding_boxes, object_descriptions_t,_,_,_ = batch
+    #randomlist = random.sample(range(0, 16), 8)
+    #vg_images = vg_images[randomlist]
+    #valid_objects = valid_objects[randomlist]
+    #bounding_boxes = bounding_boxes[randomlist]
+    object_descriptions = [list(x) for x in zip(*object_descriptions_t)]
+    #object_descriptions = [object_descriptions[i] for i in randomlist]
+    object_descriptions, targets = organize_batch_classes(object_descriptions,valid_objects,bounding_boxes,args,device)
+    num_object_descs = len(object_descriptions)
+    no_object_rows_to_add = model.num_matcher_classes - num_object_descs
+    vg_images = vg_images.to(device=device, non_blocking=True)
+    #arrange targets
+    all_targets = []
+    all_predictions = []
+    for t in range(len(targets)):
+        info = targets[t]
+        labels = info["labels"]
+        boxes = info["boxes"]
+        for s in range(labels.shape[0]):
+            target_sample = []
+            target_sample.append(t)
+            target_sample.append(labels[s].item())
+            target_sample.append(1.0)
+            box = boxes[s].tolist()
+            target_sample.append(box[0])
+            target_sample.append(box[1])
+            target_sample.append(box[2])
+            target_sample.append(box[3])
+            all_targets.append(target_sample)
+
+    with torch.no_grad():
+        text = model.tokenizer(object_descriptions,padding='max_length', truncation=True, max_length=35, 
+                                    return_tensors="pt").to(device)
+        object_descriptions += no_object_rows_to_add*["random row"] + ["no object"]
+        image_embeds = model.visual_encoder(vg_images)        
+        object_tokens = image_embeds[:,1 : 1 + args.object_tokens ,:]
+        text_output_m = model.text_encoder_m(text.input_ids, attention_mask = text.attention_mask,                      
+                                            return_dict = True, mode = 'text')    
+        text_feat = F.normalize(model.text_proj_m(text_output_m.last_hidden_state[:,0,:]),dim=-1)
+        random_rows = model.random_row
+        no_object_row = model.no_object_row.to(device)
+        random_rows = random_rows.expand(no_object_rows_to_add,-1).to(device)
+        objects_descs_feat_m = torch.cat([text_feat,random_rows,no_object_row])
+        label_embeddings = model.class_head(object_tokens)
+        label_probs = F.softmax(label_embeddings @ objects_descs_feat_m.t() / model.temp,2)
+        bb_predictions = model.bb_head(object_tokens).sigmoid()
+        label_predictions = torch.argmax(label_probs, dim = -1)
+        for t in range(len(targets)):
+            labels = label_predictions[t].tolist()
+            boxes = bb_predictions[t].tolist()
+            for s in range(len(labels)):
+                if labels[s] == model.num_matcher_classes:
+                    continue
+                pred_sample = []
+                pred_sample.append(t)
+                pred_sample.append(labels[s])
+                pred_sample.append(label_probs[t,s,labels[s]].item())
+                box = boxes[s]
+                pred_sample.append(box[0])
+                pred_sample.append(box[1])
+                pred_sample.append(box[2])
+                pred_sample.append(box[3])
+                all_predictions.append(pred_sample)
+        
+        map = mean_average_precision(all_predictions,all_targets)
+        o = 9
+
+
+
+
+
+
+
+def tokens_specialization(model,dataloader,device):
+    model.eval()
+    all_box_predictions = []
+    all_rel_box_predictions = []
+    all_embeddings = []
+    for images in tqdm(dataloader):
+        images = images.to(device=device, non_blocking = True)
+        with torch.no_grad():
+            image_embeds = model.visual_encoder(images)        
+            object_tokens = image_embeds[:,1 : 1 + args.object_tokens ,:]
+            relation_tokens = image_embeds[:,1 + args.object_tokens : 1 + args.object_tokens + args.relation_tokens ,:]
+            bb_predictions = model.bb_head(object_tokens).sigmoid()
+            rel_bb_predictions = model.rel_bb_head(relation_tokens).sigmoid()
+            label_embeddings = model.class_head(object_tokens)
+            bb_predictions = bb_predictions.detach().cpu()
+            rel_bb_predictions = rel_bb_predictions.detach().cpu()
+            label_embeddings = label_embeddings.detach().cpu()
+            all_box_predictions.append(bb_predictions)
+            all_rel_box_predictions.append(rel_bb_predictions)
+            all_embeddings.append(label_embeddings)
+    all_box_predictions = torch.stack(all_box_predictions)
+    all_box_predictions = all_box_predictions.flatten(0,1)
+    all_box_predictions = torch.permute(all_box_predictions,(1,0,2))
+    all_rel_box_predictions = torch.stack(all_rel_box_predictions)
+    all_rel_box_predictions = all_rel_box_predictions.flatten(0,1)
+    all_rel_box_predictions = torch.permute(all_rel_box_predictions,(1,0,2))    
+    all_embeddings = torch.stack(all_embeddings)
+    all_embeddings = all_embeddings.flatten(0,1)
+    all_embeddings = torch.permute(all_embeddings,(1,0,2))
+    torch.save(all_box_predictions,"tokens_specialization/box_predictions.pt")
+    torch.save(all_rel_box_predictions,"tokens_specialization/rel_box_predictions.pt")
+    torch.save(all_embeddings,"tokens_specialization/embeddings.pt")
+
+    return
 
 
 def remove_repetitions(object_indexes, label_predictions_list):
@@ -69,6 +188,19 @@ def organize_batch_classes(object_descriptions, valid_objects, vg_bbs, args, dev
         else:
             mask = torch.tensor(valid_for_sample).unsqueeze(1).expand(-1,4)
             boxes_for_sample = torch.masked_select(vg_bbs[i],mask).view(-1,4).to(device=device, non_blocking=True)
+            if args.random_graph_ablation:
+                random_bbs = []
+                for k in range(boxes_for_sample.shape[0]):
+                    x1 = np.random.uniform(0,1)
+                    y1 = np.random.uniform(0,1)
+                    x2 = np.random.uniform(x1,1) 
+                    y2 = np.random.uniform(y1,1)
+                    w = x2-x1
+                    h = y2-y1
+                    x_c = (x1 + x2)/2
+                    y_c = (y1 + y2)/2  
+                    random_bbs.append(torch.FloatTensor([x_c,y_c,w,h]))
+                boxes_for_sample = torch.stack(random_bbs).to(device=boxes_for_sample.device, non_blocking=True)
             tgt_boxes.append(boxes_for_sample)
     
     
@@ -89,6 +221,12 @@ def organize_batch_classes(object_descriptions, valid_objects, vg_bbs, args, dev
                 labels_for_sample.append(len(class_tokens))
                 class_tokens.append(desc)
         tgt_labels.append(torch.tensor(labels_for_sample).type(torch.int64).to(device=device, non_blocking=True))
+    if args.random_graph_ablation:
+        all_possible_classes = list(range(len(class_tokens)))
+        for s in range(len(tgt_labels)):
+            labels = random.sample(all_possible_classes,tgt_labels[s].shape[0])
+            tgt_labels[s] = torch.tensor(labels).type(torch.int64).to(device=device, non_blocking=True)
+ 
     targets = [{"labels": l, "boxes": b} for l,b in zip(tgt_labels,tgt_boxes)]
     return class_tokens, targets
 
@@ -108,6 +246,19 @@ def organize_batch_classes_relations(relation_descriptions, valid_relations, vg_
         else:
             mask = torch.tensor(valid_for_sample).unsqueeze(1).expand(-1,4)
             boxes_for_sample = torch.masked_select(vg_bbs[i],mask).view(-1,4).to(device=device, non_blocking=True)
+            if args.random_graph_ablation:
+                random_bbs = []
+                for k in range(boxes_for_sample.shape[0]):
+                    x1 = np.random.uniform(0,1)
+                    y1 = np.random.uniform(0,1)
+                    x2 = np.random.uniform(x1,1) 
+                    y2 = np.random.uniform(y1,1)
+                    w = x2-x1
+                    h = y2-y1
+                    x_c = (x1 + x2)/2
+                    y_c = (y1 + y2)/2  
+                    random_bbs.append(torch.FloatTensor([x_c,y_c,w,h]))
+                boxes_for_sample = torch.stack(random_bbs).to(device=boxes_for_sample.device, non_blocking=True)
             tgt_boxes.append(boxes_for_sample)
     
     
@@ -128,6 +279,11 @@ def organize_batch_classes_relations(relation_descriptions, valid_relations, vg_
                 labels_for_sample.append(len(class_tokens))
                 class_tokens.append(desc)
         tgt_labels.append(torch.tensor(labels_for_sample).type(torch.int64).to(device=device, non_blocking=True))
+    if args.random_graph_ablation:
+        all_possible_classes = list(range(len(class_tokens)))
+        for s in range(len(tgt_labels)):
+            labels = random.sample(all_possible_classes,tgt_labels[s].shape[0])
+            tgt_labels[s] = torch.tensor(labels).type(torch.int64).to(device=device, non_blocking=True)
     targets = [{"labels": l, "boxes": b} for l,b in zip(tgt_labels,tgt_boxes)]
     return class_tokens, targets
 
@@ -375,7 +531,9 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
             ce_correct = loss_dict["ce_correct"]
             class_error = loss_dict["class_error"]
             loss_dict.pop("ce_correct")
-            loss_sg = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict) * args.vg_loss_lambda                  
+            loss_sg = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict) * args.vg_loss_lambda
+            if args.relations > 0:
+                loss_sg /= 2                 
             loss +=  loss_sg
         
         optimizer.zero_grad()
@@ -588,15 +746,19 @@ def main(args, config):
                 
         if utils.is_main_process():
             if args.evaluate:
+                evaluate_map_objects(model_without_ddp,vg_val_batch,args,epoch)
                 if args.winoground_frequency > 0:
                     processor = blip_processor(config["image_size"])
-                    winoground_dict = evaluate_winoground(model_without_ddp, processor,device)
+                    winoground_dict, detailed_dict = evaluate_winoground(model_without_ddp, processor,device)
                     winoground_folder = os.path.join(args.output_dir,"winoground")
                     if not os.path.exists(winoground_folder):
                         os.mkdir(winoground_folder)
                     winoground_dict_path = os.path.join(winoground_folder,"winoground_" + str(epoch))
                     with open(os.path.join(winoground_dict_path), 'w',encoding='utf-8') as f:
                         json.dump(winoground_dict, f)
+                    detailed_dict_path = os.path.join(winoground_folder,"winoground_detailed_" + str(epoch))
+                    with open(os.path.join(detailed_dict_path), 'w',encoding='utf-8') as f:
+                        json.dump(detailed_dict, f)
 
 
                 if args.vlchecklist_frequency > 0:
@@ -630,16 +792,23 @@ def main(args, config):
                         json.dump(results_by_cat, f)
                     with open(os.path.join(vsr_dict_path2), 'w',encoding='utf-8') as f:
                         json.dump(results_by_meta_cat, f)
+                if args.tokens_specialization:
+                    coco_dataset = coco_karpathy_caption_eval(blip_processor(config["image_size"]),"../../../datasets/MSCoco","../../../datasets/MSCoco","val")
+                    coco_loader = DataLoader(coco_dataset,32)
+                    tokens_specialization(model_without_ddp,coco_loader,device)
             else:
                 if args.winoground_frequency > 0 and (epoch + 1) % args.winoground_frequency == 0:
                     processor = blip_processor(config["image_size"])
-                    winoground_dict = evaluate_winoground(model_without_ddp, processor,device)
+                    winoground_dict, detailed_dict = evaluate_winoground(model_without_ddp, processor,device)
                     winoground_folder = os.path.join(args.output_dir,"winoground")
                     if not os.path.exists(winoground_folder):
                         os.mkdir(winoground_folder)
                     winoground_dict_path = os.path.join(winoground_folder,"winoground_" + str(epoch))
                     with open(os.path.join(winoground_dict_path), 'w',encoding='utf-8') as f:
                         json.dump(winoground_dict, f)
+                    detailed_dict_path = os.path.join(winoground_folder,"winoground_detailed_" + str(epoch))
+                    with open(os.path.join(detailed_dict_path), 'w',encoding='utf-8') as f:
+                        json.dump(detailed_dict, f)
 
 
                 if args.vlchecklist_frequency > 0 and (epoch + 1) % args.vlchecklist_frequency == 0:
@@ -719,6 +888,7 @@ if __name__ == '__main__':
     parser.add_argument("--no-relation-ablation", action='store_true')
     parser.add_argument("--random-graph-ablation", action='store_true')
     parser.add_argument("--size-ablation", default = 1.0, type=float)
+    parser.add_argument("--tokens-specialization", action='store_true')
 
     
 

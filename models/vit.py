@@ -80,11 +80,6 @@ class Attention(nn.Module):
             else:
                 self.qkv_prompts = lora_layers.Linear(dim, dim * 3,bias=qkv_bias, r = prompts_lora)
                 self.proj_prompts = lora_layers.Linear(dim, dim, r=prompts_lora)
-                with torch.no_grad():
-                    self.qkv_prompts.weight.copy_(self.qkv.weight)
-                    self.qkv_prompts.bias.copy_(self.qkv.bias)
-                    self.proj_prompts.weight.copy_(self.proj.weight)
-                    self.proj_prompts.bias.copy_(self.proj.bias)
         self.attn_gradients = None
         self.attention_map = None
         self.mask_attention = mask_attention
@@ -176,13 +171,6 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, lora = lora)
         if self.prompt_attention_full:
             self.mlp_prompts = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop, lora = prompts_lora)
-            if prompts_lora != -1:
-                with torch.no_grad():
-                    self.mlp_prompts.fc1.weight.copy_(self.mlp.fc1.weight)
-                    self.mlp_prompts.fc1.bias.copy_(self.mlp.fc1.bias)
-                    self.mlp_prompts.fc2.weight.copy_(self.mlp.fc2.weight)
-                    self.mlp_prompts.fc2.bias.copy_(self.mlp.fc2.bias)
-        
         self.objects = objects + relations
 
 

@@ -67,7 +67,7 @@ class coco_karpathy_caption_eval(Dataset):
         self.image_root = image_root
         
     def __len__(self):
-        return len(self.annotation)
+        return len(self.annotation) - 8
     
     def __getitem__(self, index):    
         
@@ -79,7 +79,7 @@ class coco_karpathy_caption_eval(Dataset):
         
         img_id = ann['image'].split('/')[-1].strip('.jpg').split('_')[-1]
         
-        return image, int(img_id)   
+        return image   
     
     
 class coco_karpathy_retrieval_eval(Dataset):
