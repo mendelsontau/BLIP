@@ -523,7 +523,7 @@ def train(model, data_loader, optimizer, epoch, device, config, args, vg_data_lo
         loss_ita, loss_itm, loss_neg, loss_dict, weight_dict = model(image, caption, alpha=alpha, idx=idx, vg_batch_size=vg_batch_size, ignore_mask=neg_mask, objects_descs = objects_descs, targets = targets, relations_descs = relations_descs, relations_targets=relations_targets, laion_negs = laion_negs, laion_neg_mask = laion_neg_mask)
         loss = loss_ita + loss_itm
         if args.negatives or args.laion_augmentations:
-            loss += loss_neg
+            loss += loss_neg * args.negatives_loss_lambda
         if args.vg_loss_lambda > 0.0:
             loss_ce = loss_dict["loss_ce"]
             loss_bbox = loss_dict["loss_bbox"]
@@ -859,6 +859,7 @@ if __name__ == '__main__':
     parser.add_argument('--workers', default = 1, type=int)
     parser.add_argument('--vg-data', default = None, type=str)
     parser.add_argument('--vg-loss-lambda', default = 0.0, type=float)
+    parser.add_argument('--negatives-loss-lambda', default = 1.0, type=float)
     parser.add_argument('--negatives', action='store_true')
     parser.add_argument('--batch-size', default = 32, type=int)
     parser.add_argument('--vg-batch-size', default = 8, type=int)
