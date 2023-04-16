@@ -630,13 +630,9 @@ def main(args, config):
         model.no_object_row.requires_grad_()
         for param in model.bb_head.parameters():
             param.requires_grad_()
-        for param in model.class_head.parameters():
-            param.requires_grad_()
         if args.relations > 0:
             model.no_relation_row.requires_grad_()
             for param in model.rel_bb_head.parameters():
-                param.requires_grad_()
-            for param in model.rel_class_head.parameters():
                 param.requires_grad_()
 
     for name, param in model.named_parameters():

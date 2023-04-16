@@ -74,9 +74,9 @@ class BLIP_Retrieval_vg(nn.Module):
         device = torch.device(args.device)
 
         self.objects = args.objects
-        self.object_tokens = args.object_tokens
+        self.object_tokens = args.object_tokens * 2
         self.relations = args.relations
-        self.relation_tokens = args.relation_tokens
+        self.relation_tokens = args.relation_tokens * 2
         self.prompt_attention = True if args.prompt_attention else False
         self.prompt_attention_full = True if args.prompt_attention_full else False
         self.mask_layers = args.mask_layers
@@ -146,7 +146,6 @@ class BLIP_Retrieval_vg(nn.Module):
                              eos_coef=(5.5/self.object_tokens), losses=losses)
             self.vgcriterion.to(args.device)
 
-            self.class_head = MLP_Head(vision_width, vision_width, embed_dim,3).to(device)
             self.bb_head = MLP_Head(vision_width, vision_width, 4, 3).to(device)
             self.random_row = nn.Parameter(torch.zeros(1,embed_dim))
             self.no_object_row = nn.Parameter(torch.zeros(1,embed_dim))
@@ -156,7 +155,6 @@ class BLIP_Retrieval_vg(nn.Module):
                                 eos_coef=(1.8/self.relation_tokens), losses=losses)
                 self.vgrelcriterion.to(args.device)
                 self.no_relation_row = nn.Parameter(torch.zeros(1,embed_dim))
-                self.rel_class_head = MLP_Head(vision_width, vision_width, embed_dim,3).to(device)
                 self.rel_bb_head = MLP_Head(vision_width, vision_width, 4, 3).to(device)
         
     def forward(self, image, caption, alpha, idx, vg_batch_size = 0, ignore_mask = None, objects_descs = None, targets = None, relations_descs = None, relations_targets = None
@@ -293,9 +291,9 @@ class BLIP_Retrieval_vg(nn.Module):
             no_object_row = self.no_object_row.to(image.device)
             random_rows = random_rows.expand(no_object_rows_to_add,-1).to(image.device)
             objects_descs_feat_m = torch.cat([objects_descs_feat_m,random_rows,no_object_row])
-            label_embeddings = self.class_head(object_tokens)
+            label_embeddings = F.normalize(self.vision_proj(object_tokens[:,:int(self.object_tokens/2),:]))
             label_predictions = label_embeddings @ objects_descs_feat_m.t() / self.temp 
-            bb_predictions = self.bb_head(object_tokens).sigmoid()
+            bb_predictions = self.bb_head(object_tokens[:,-int(self.object_tokens/2):,:]).sigmoid()
             predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
             loss_dict = self.vgcriterion(predictions_dict, targets)
             weight_dict = self.vgcriterion.weight_dict
@@ -305,9 +303,9 @@ class BLIP_Retrieval_vg(nn.Module):
                 no_relation_row = self.no_relation_row.to(image.device)
                 random_rows = random_rows.expand(no_relation_rows_to_add,-1).to(image.device)
                 relations_descs_feat_m = torch.cat([relations_descs_feat_m,random_rows,no_relation_row])
-                label_embeddings = self.rel_class_head(relation_tokens)
+                label_embeddings = F.normalize(self.vision_proj(relation_tokens[:,:int(self.relation_tokens/2),:]))
                 label_predictions = label_embeddings @ relations_descs_feat_m.t() / self.temp 
-                bb_predictions = self.rel_bb_head(relation_tokens).sigmoid()
+                bb_predictions = self.rel_bb_head(relation_tokens[:,-int(self.relation_tokens/2):,:]).sigmoid()
                 predictions_dict = {"pred_logits" : label_predictions, "pred_boxes": bb_predictions}
                 relation_loss_dict = self.vgrelcriterion(predictions_dict, relations_targets)
                 loss_dict = {k: loss_dict[k] + relation_loss_dict[k] for k in loss_dict}
