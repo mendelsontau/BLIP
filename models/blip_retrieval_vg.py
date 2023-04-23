@@ -86,7 +86,7 @@ class BLIP_Retrieval_vg(nn.Module):
         self.tokenizer = init_tokenizer()   
         med_config = BertConfig.from_json_file(med_config)
         med_config.encoder_width = vision_width
-        self.text_encoder = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora if self.text_lora else -1)          
+        self.text_encoder = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora if self.text_lora else -1, lora_cross = args.lora_cross)          
 
         text_width = self.text_encoder.config.hidden_size
         
@@ -101,7 +101,7 @@ class BLIP_Retrieval_vg(nn.Module):
         # create momentum encoders  
         self.visual_encoder_m, vision_width = create_vit(vit,image_size, lora = args.lora if self.image_lora else -1, prompts_lora = args.prompts_lora, objects = self.object_tokens, relations = self.relation_tokens, prompt_attention = self.prompt_attention , prompt_attention_full = self.prompt_attention_full, mask_layers=self.mask_layers)              
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
-        self.text_encoder_m = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora if self.text_lora else -1)    
+        self.text_encoder_m = BertModel(config=med_config, add_pooling_layer=False, lora = args.lora if self.text_lora else -1, lora_cross = args.lora_cross)    
         self.text_proj_m = nn.Linear(text_width, embed_dim)
         
         self.model_pairs = [[self.visual_encoder,self.visual_encoder_m],
@@ -519,6 +519,13 @@ def blip_retrieval_vg(pretrained='',**kwargs):
                     b.norm1_prompts.bias.copy_(b.norm1.bias)
                     b.norm2_prompts.weight.copy_(b.norm2.weight)
                     b.norm2_prompts.bias.copy_(b.norm2.bias)
+            if args.lora_cross == True:
+                for l in model.text_encoder.encoder.layer:
+                    l.crossattention.self.key_prompts.weight.copy_(l.crossattention.self.key.weight)
+                    l.crossattention.self.key_prompts.bias.copy_(l.crossattention.self.key.bias)
+                    l.crossattention.self.value_prompts.weight.copy_(l.crossattention.self.value.weight)
+                    l.crossattention.self.value_prompts.bias.copy_(l.crossattention.self.value.bias)
+
 
     return model 
 

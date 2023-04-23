@@ -880,6 +880,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', default = 0.0001, type=float)
     parser.add_argument('--prompt-attention', action='store_true')
     parser.add_argument('--prompt-attention-full', action='store_true')
+    parser.add_argument('--lora-cross',default = -1, type=int)
     parser.add_argument('--mask-layers', default=None, type=str)
     parser.add_argument('--lock', action='store_true')
     parser.add_argument('--epochs', default = 0, type=int)

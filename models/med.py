@@ -97,7 +97,7 @@ class BertEmbeddings(nn.Module):
 
 
 class BertSelfAttention(nn.Module):
-    def __init__(self, config, is_cross_attention, lora = -1):
+    def __init__(self, config, is_cross_attention, lora = -1, lora_cross = -1):
         super().__init__()
         self.config = config
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
@@ -109,11 +109,18 @@ class BertSelfAttention(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
+        self.lora_cross = lora_cross
         if lora != -1:
             self.query = lora_layers.Linear(config.hidden_size, self.all_head_size, r=lora)
             if is_cross_attention:
-                self.key = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora)
-                self.value = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora)
+                if lora_cross == -1:
+                    self.key = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora)
+                    self.value = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora)
+                else:
+                    self.key = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora)
+                    self.value = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora)
+                    self.key_prompts = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora_cross)
+                    self.value_prompts = lora_layers.Linear(config.encoder_width, self.all_head_size, r=lora_cross)                   
             else:
                 self.key = lora_layers.Linear(config.hidden_size, self.all_head_size, r=lora)
                 self.value = lora_layers.Linear(config.hidden_size, self.all_head_size, r=lora)
@@ -167,10 +174,23 @@ class BertSelfAttention(nn.Module):
         # such that the encoder's padding tokens are not attended to.
         is_cross_attention = encoder_hidden_states is not None
 
-        if is_cross_attention:
+
+        if is_cross_attention and self.lora_cross == -1:
             key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
             value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
             attention_mask = encoder_attention_mask
+        elif is_cross_attention and self.lora_cross != -1:
+            num_prompt_tokens = encoder_hidden_states.shape[1] - 197
+            patch_cls = torch.cat([encoder_hidden_states[:,0:1,:],encoder_hidden_states[:,num_prompt_tokens + 1 :,:]], dim = 1)
+            sg = encoder_hidden_states[: , 1: 1 + num_prompt_tokens, :]
+            patch_cls_key_layer = self.key(patch_cls)
+            sg_key_layer = self.key_prompts(sg)
+            patch_cls_value_layer = self.value(patch_cls)
+            sg_value_layer = self.value_prompts(sg)
+            key_layer = self.transpose_for_scores(torch.cat([patch_cls_key_layer[:,0:1,:],sg_key_layer,patch_cls_key_layer[:,1:,:]],dim=1))
+            value_layer = self.transpose_for_scores(torch.cat([patch_cls_value_layer[:,0:1,:],sg_value_layer,patch_cls_value_layer[:,1:,:]],dim = 1))
+            attention_mask = encoder_attention_mask
+
         elif past_key_value is not None:
             key_layer = self.transpose_for_scores(self.key(hidden_states))
             value_layer = self.transpose_for_scores(self.value(hidden_states))
@@ -253,9 +273,9 @@ class BertSelfOutput(nn.Module):
 
 
 class BertAttention(nn.Module):
-    def __init__(self, config, is_cross_attention=False, lora = -1):
+    def __init__(self, config, is_cross_attention=False, lora = -1, lora_cross = -1):
         super().__init__()
-        self.self = BertSelfAttention(config, is_cross_attention, lora=lora)
+        self.self = BertSelfAttention(config, is_cross_attention, lora=lora, lora_cross = lora_cross)
         self.output = BertSelfOutput(config,lora=lora)
         self.pruned_heads = set()
 
@@ -337,7 +357,7 @@ class BertOutput(nn.Module):
 
 
 class BertLayer(nn.Module):
-    def __init__(self, config, layer_num, lora = -1):
+    def __init__(self, config, layer_num, lora = -1, lora_cross = -1):
         super().__init__()
         self.config = config
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
@@ -345,7 +365,7 @@ class BertLayer(nn.Module):
         self.attention = BertAttention(config, lora = lora)      
         self.layer_num = layer_num          
         if self.config.add_cross_attention:
-            self.crossattention = BertAttention(config, is_cross_attention=self.config.add_cross_attention, lora = lora)
+            self.crossattention = BertAttention(config, is_cross_attention=self.config.add_cross_attention, lora = lora, lora_cross = lora_cross)
         self.intermediate = BertIntermediate(config, lora = lora)
         self.output = BertOutput(config, lora = lora)
 
@@ -403,10 +423,10 @@ class BertLayer(nn.Module):
 
 
 class BertEncoder(nn.Module):
-    def __init__(self, config, lora = -1):
+    def __init__(self, config, lora = -1, lora_cross = -1):
         super().__init__()
         self.config = config
-        self.layer = nn.ModuleList([BertLayer(config,i, lora = lora) for i in range(config.num_hidden_layers)])
+        self.layer = nn.ModuleList([BertLayer(config,i, lora = lora, lora_cross = lora_cross) for i in range(config.num_hidden_layers)])
         self.gradient_checkpointing = False
 
     def forward(
@@ -608,13 +628,13 @@ class BertModel(BertPreTrainedModel):
     input to the forward pass.
     """
 
-    def __init__(self, config, add_pooling_layer=True, lora = -1):
+    def __init__(self, config, add_pooling_layer=True, lora = -1, lora_cross = -1):
         super().__init__(config)
         self.config = config
 
         self.embeddings = BertEmbeddings(config, lora = lora)
         
-        self.encoder = BertEncoder(config, lora = lora)
+        self.encoder = BertEncoder(config, lora = lora, lora_cross = lora_cross)
 
         self.pooler = BertPooler(config, lora = lora) if add_pooling_layer else None
 
@@ -983,3 +1003,4 @@ class BertLMHeadModel(BertPreTrainedModel):
         for layer_past in past:
             reordered_past += (tuple(past_state.index_select(0, beam_idx) for past_state in layer_past),)
         return reordered_past
+
